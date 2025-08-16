@@ -1,0 +1,252 @@
+name: CloudFormation CI/CD
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/cloudformation-ci.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/cloudformation-ci.yml'
+
+env:
+  CF_WORKING_DIR: 'cloudformation'
+
+jobs:
+  cloudformation-validate:
+    name: 'CloudFormation Validate'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install cfn-lint
+        run: |
+          pip install cfn-lint
+          
+      - name: CloudFormation Lint
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          cfn-lint iam-lambda-eventbridge.yaml
+          
+      - name: CloudFormation Validate
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://iam-lambda-eventbridge.yaml
+
+  cloudformation-deploy-dev:
+    name: 'CloudFormation Deploy (Dev)'
+    runs-on: ubuntu-latest
+    needs: cloudformation-validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Update Parameters File
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          # Get account ID
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          # Update parameters file with actual account ID
+          sed -i "s/ACCOUNT_ID/$ACCOUNT_ID/g" parameters-dev.json
+          
+          # Update SNS topic ARN
+          SNS_TOPIC_ARN="arn:aws:sns:${{ secrets.AWS_REGION }}:$ACCOUNT_ID:dev-alerts"
+          sed -i "s|arn:aws:sns:us-east-1:ACCOUNT_ID:dev-alerts|$SNS_TOPIC_ARN|g" parameters-dev.json
+          
+      - name: Deploy CloudFormation Stack
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          # Check if stack exists
+          if aws cloudformation describe-stacks --stack-name iam-lambda-eventbridge-dev 2>/dev/null; then
+            echo "Stack exists, updating..."
+            aws cloudformation update-stack \
+              --stack-name iam-lambda-eventbridge-dev \
+              --template-body file://iam-lambda-eventbridge.yaml \
+              --parameters file://parameters-dev.json \
+              --capabilities CAPABILITY_NAMED_IAM
+          else
+            echo "Stack does not exist, creating..."
+            aws cloudformation create-stack \
+              --stack-name iam-lambda-eventbridge-dev \
+              --template-body file://iam-lambda-eventbridge.yaml \
+              --parameters file://parameters-dev.json \
+              --capabilities CAPABILITY_NAMED_IAM
+          fi
+          
+          # Wait for stack to complete
+          aws cloudformation wait stack-create-complete \
+            --stack-name iam-lambda-eventbridge-dev || \
+          aws cloudformation wait stack-update-complete \
+            --stack-name iam-lambda-eventbridge-dev
+            
+      - name: Get Stack Outputs
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name iam-lambda-eventbridge-dev \
+            --query 'Stacks[0].Outputs' \
+            --output table
+            
+      - name: Test Lambda Function
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          # Get Lambda function name
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name iam-lambda-eventbridge-dev \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' \
+            --output text | cut -d':' -f7)
+          
+          # Invoke Lambda function
+          aws lambda invoke \
+            --function-name $FUNCTION_NAME \
+            --payload '{"test": "event"}' \
+            response.json
+            
+          # Check response
+          cat response.json
+          
+      - name: Comment Deploy Results on PR
+        uses: actions/github-script@v6
+        if: always()
+        with:
+          script: |
+            const comment = `## CloudFormation Deploy Complete ✅
+            
+            IAM, Lambda, and EventBridge resources have been deployed to **dev** environment.
+            
+            **Resources Created:**
+            - Lambda execution role
+            - EC2 instance role and profile
+            - Deployment role
+            - Bucket Guardian Lambda function
+            - EventBridge rules for nightly and S3 events
+            
+            **Next Steps:**
+            1. Verify Lambda function execution
+            2. Test EventBridge rule triggers
+            3. Monitor CloudWatch logs for Lambda execution`;
+            
+            // Find the latest PR and comment
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 1
+            });
+            
+            if (prs.length > 0) {
+              github.rest.issues.createComment({
+                issue_number: prs[0].number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+
+  cloudformation-deploy-prod:
+    name: 'CloudFormation Deploy (Prod)'
+    runs-on: ubuntu-latest
+    needs: cloudformation-deploy-dev
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: prod
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Create Prod Parameters
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          # Get account ID
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          
+          # Create prod parameters file
+          cat > parameters-prod.json << EOF
+          [
+            {
+              "ParameterKey": "Environment",
+              "ParameterValue": "prod"
+            },
+            {
+              "ParameterKey": "S3LogsBucket",
+              "ParameterValue": "app-logs-prod-$ACCOUNT_ID"
+            },
+            {
+              "ParameterKey": "S3ArtifactsBucket",
+              "ParameterValue": "app-artifacts-prod-$ACCOUNT_ID"
+            },
+            {
+              "ParameterKey": "S3DataBucket",
+              "ParameterValue": "app-data-prod-$ACCOUNT_ID"
+            },
+            {
+              "ParameterKey": "SNSTopicArn",
+              "ParameterValue": "arn:aws:sns:${{ secrets.AWS_REGION }}:$ACCOUNT_ID:prod-alerts"
+            }
+          ]
+          EOF
+          
+      - name: Deploy CloudFormation Stack
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          # Check if stack exists
+          if aws cloudformation describe-stacks --stack-name iam-lambda-eventbridge-prod 2>/dev/null; then
+            echo "Stack exists, updating..."
+            aws cloudformation update-stack \
+              --stack-name iam-lambda-eventbridge-prod \
+              --template-body file://iam-lambda-eventbridge.yaml \
+              --parameters file://parameters-prod.json \
+              --capabilities CAPABILITY_NAMED_IAM
+          else
+            echo "Stack does not exist, creating..."
+            aws cloudformation create-stack \
+              --stack-name iam-lambda-eventbridge-prod \
+              --template-body file://iam-lambda-eventbridge.yaml \
+              --parameters file://parameters-prod.json \
+              --capabilities CAPABILITY_NAMED_IAM
+          fi
+          
+          # Wait for stack to complete
+          aws cloudformation wait stack-create-complete \
+            --stack-name iam-lambda-eventbridge-prod || \
+          aws cloudformation wait stack-update-complete \
+            --stack-name iam-lambda-eventbridge-prod
+            
+      - name: Get Stack Outputs
+        working-directory: ${{ env.CF_WORKING_DIR }}
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name iam-lambda-eventbridge-prod \
+            --query 'Stacks[0].Outputs' \
+            --output table 

@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "S3LogsBucket",
+    "ParameterValue": "app-logs-dev-ACCOUNT_ID"
+  },
+  {
+    "ParameterKey": "S3ArtifactsBucket",
+    "ParameterValue": "app-artifacts-dev-ACCOUNT_ID"
+  },
+  {
+    "ParameterKey": "S3DataBucket",
+    "ParameterValue": "app-data-dev-ACCOUNT_ID"
+  },
+  {
+    "ParameterKey": "SNSTopicArn",
+    "ParameterValue": "arn:aws:sns:us-east-1:ACCOUNT_ID:dev-alerts"
+  }
+] 

@@ -1,0 +1,417 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM, Lambda, and EventBridge resources for AWS Cloud Infrastructure Automation'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+  
+  S3LogsBucket:
+    Type: String
+    Description: S3 bucket name for logs
+  
+  S3ArtifactsBucket:
+    Type: String
+    Description: S3 bucket name for artifacts
+  
+  S3DataBucket:
+    Type: String
+    Description: S3 bucket name for data
+  
+  SNSTopicArn:
+    Type: String
+    Description: ARN of the SNS topic for alerts
+
+Resources:
+  # IAM Role for Lambda execution
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3LogsBucket}'
+                  - !Sub 'arn:aws:s3:::${S3LogsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3ArtifactsBucket}'
+                  - !Sub 'arn:aws:s3:::${S3ArtifactsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3DataBucket}'
+                  - !Sub 'arn:aws:s3:::${S3DataBucket}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-lambda-execution-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for EC2 instances
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-ec2-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3LogsBucket}'
+                  - !Sub 'arn:aws:s3:::${S3LogsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3ArtifactsBucket}'
+                  - !Sub 'arn:aws:s3:::${S3ArtifactsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${S3DataBucket}'
+                  - !Sub 'arn:aws:s3:::${S3DataBucket}/*'
+        - PolicyName: SSMParameterAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:*:*:parameter/${Environment}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-ec2-instance-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Instance Profile for EC2
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${Environment}-ec2-instance-profile'
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # IAM Role for deployment
+  DeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-deployment-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-deployment-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function - Bucket Guardian
+  BucketGuardianLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-bucket-guardian'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          from datetime import datetime
+          
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          # Initialize AWS clients
+          s3 = boto3.client('s3')
+          sns = boto3.client('sns')
+          
+          def lambda_handler(event, context):
+              """Lambda function to validate S3 bucket configuration and objects"""
+              logger.info(f"Event: {json.dumps(event)}")
+              
+              try:
+                  # Get environment from function name
+                  function_name = context.function_name
+                  environment = function_name.split('-')[0]
+                  
+                  # Define required tags
+                  required_tags = {
+                      'Project': 'Cloud-IaC',
+                      'Owner': 'VarunN',
+                      'Environment': environment,
+                      'CostCenter': 'R&D'
+                  }
+                  
+                  # Define buckets to check
+                  buckets = [
+                      f'app-logs-{environment}-{context.invoked_function_arn.split(":")[4]}',
+                      f'app-artifacts-{environment}-{context.invoked_function_arn.split(":")[4]}',
+                      f'app-data-{environment}-{context.invoked_function_arn.split(":")[4]}'
+                  ]
+                  
+                  validation_results = []
+                  
+                  for bucket_name in buckets:
+                      try:
+                          # Check if bucket exists
+                          s3.head_bucket(Bucket=bucket_name)
+                          
+                          # Get bucket tagging
+                          try:
+                              response = s3.get_bucket_tagging(Bucket=bucket_name)
+                              bucket_tags = {tag['Key']: tag['Value'] for tag in response['TagSet']}
+                          except s3.exceptions.ClientError:
+                              bucket_tags = {}
+                          
+                          # Validate tags
+                          missing_tags = []
+                          for required_key, required_value in required_tags.items():
+                              if required_key not in bucket_tags or bucket_tags[required_key] != required_value:
+                                  missing_tags.append(f"{required_key}={required_value}")
+                          
+                          if missing_tags:
+                              validation_results.append({
+                                  'bucket': bucket_name,
+                                  'status': 'FAILED',
+                                  'issue': f"Missing required tags: {', '.join(missing_tags)}"
+                              })
+                          else:
+                              validation_results.append({
+                                  'bucket': bucket_name,
+                                  'status': 'PASSED',
+                                  'issue': 'All required tags present'
+                              })
+                          
+                          # Check for objects in incoming/ prefix (if data bucket)
+                          if 'data' in bucket_name:
+                              try:
+                                  response = s3.list_objects_v2(
+                                      Bucket=bucket_name,
+                                      Prefix='incoming/',
+                                      MaxKeys=10
+                                  )
+                                  
+                                  if 'Contents' in response:
+                                      for obj in response['Contents']:
+                                          # Validate object size (max 100MB)
+                                          if obj['Size'] > 104857600:  # 100MB in bytes
+                                              validation_results.append({
+                                                  'bucket': bucket_name,
+                                                  'status': 'WARNING',
+                                                  'issue': f"Large object found: {obj['Key']} ({obj['Size']} bytes)"
+                                              })
+                                          
+                                          # Check object tags
+                                          try:
+                                              obj_tags = s3.get_object_tagging(Bucket=bucket_name, Key=obj['Key'])
+                                              if not obj_tags.get('TagSet'):
+                                                  validation_results.append({
+                                                      'bucket': bucket_name,
+                                                      'status': 'WARNING',
+                                                      'issue': f"Object missing tags: {obj['Key']}"
+                                                  })
+                                          except:
+                                              validation_results.append({
+                                                  'bucket': bucket_name,
+                                                  'status': 'WARNING',
+                                                  'issue': f"Object missing tags: {obj['Key']}"
+                                              })
+                              except Exception as e:
+                                  logger.warning(f"Could not check objects in {bucket_name}: {str(e)}")
+                          
+                      except s3.exceptions.ClientError as e:
+                          if e.response['Error']['Code'] == '404':
+                              validation_results.append({
+                                  'bucket': bucket_name,
+                                  'status': 'FAILED',
+                                  'issue': 'Bucket does not exist'
+                              })
+                          else:
+                              validation_results.append({
+                                  'bucket': bucket_name,
+                                  'status': 'ERROR',
+                                  'issue': f"Error accessing bucket: {str(e)}"
+                              })
+                  
+                  # Log results
+                  logger.info(f"Validation results: {json.dumps(validation_results, indent=2)}")
+                  
+                  # Send SNS notification if there are failures
+                  failures = [r for r in validation_results if r['status'] in ['FAILED', 'ERROR']]
+                  if failures:
+                      message = f"Bucket validation failures detected in {environment} environment:\n\n"
+                      for failure in failures:
+                          message += f"• {failure['bucket']}: {failure['issue']}\n"
+                      
+                      try:
+                          sns.publish(
+                              TopicArn='${SNSTopicArn}',
+                              Subject=f"Bucket Validation Alert - {environment.upper()}",
+                              Message=message
+                          )
+                      except Exception as e:
+                          logger.error(f"Failed to send SNS notification: {str(e)}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Bucket validation completed',
+                          'results': validation_results,
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Lambda execution failed: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e),
+                          'timestamp': datetime.utcnow().isoformat()
+                      })
+                  }
+      
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC_ARN: !Ref SNSTopicArn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-bucket-guardian'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # EventBridge Rule for nightly execution
+  NightlyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-nightly-bucket-validation'
+      Description: 'Trigger bucket validation every night at 6 PM UTC'
+      ScheduleExpression: 'cron(0 18 * * ? *)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BucketGuardianLambda.Arn
+          Id: BucketGuardian
+
+  # EventBridge Rule for S3 PutObject events
+  S3PutObjectRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-s3-putobject-validation'
+      Description: 'Trigger validation on S3 PutObject events in incoming/ prefix'
+      EventPattern: !Sub |
+        {
+          "source": ["aws.s3"],
+          "detail-type": ["Object Created"],
+          "detail": {
+            "bucket": {
+              "name": ["${S3DataBucket}"]
+            },
+            "object": {
+              "key": [{"prefix": "incoming/"}]
+            }
+          }
+        }
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BucketGuardianLambda.Arn
+          Id: BucketGuardianS3
+
+  # Permission for EventBridge to invoke Lambda (nightly)
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BucketGuardianLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NightlyRule.Arn
+
+  # Permission for EventBridge to invoke Lambda (S3 events)
+  PermissionForS3EventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BucketGuardianLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3PutObjectRule.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Bucket Guardian Lambda function'
+    Value: !GetAtt BucketGuardianLambda.Arn
+    Export:
+      Name: !Sub '${Environment}-BucketGuardianLambdaArn'
+
+  LambdaExecutionRoleArn:
+    Description: 'ARN of the Lambda execution IAM role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${Environment}-LambdaExecutionRoleArn'
+
+  EC2InstanceRoleArn:
+    Description: 'ARN of the EC2 instance IAM role'
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: !Sub '${Environment}-EC2InstanceRoleArn'
+
+  EC2InstanceProfileArn:
+    Description: 'ARN of the EC2 instance profile'
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: !Sub '${Environment}-EC2InstanceProfileArn'
+
+  DeploymentRoleArn:
+    Description: 'ARN of the deployment IAM role'
+    Value: !GetAtt DeploymentRole.Arn
+    Export:
+      Name: !Sub '${Environment}-DeploymentRoleArn'
+
+  NightlyRuleArn:
+    Description: 'ARN of the nightly EventBridge rule'
+    Value: !GetAtt NightlyRule.Arn
+    Export:
+      Name: !Sub '${Environment}-NightlyRuleArn'
+
+  S3PutObjectRuleArn:
+    Description: 'ARN of the S3 PutObject EventBridge rule'
+    Value: !GetAtt S3PutObjectRule.Arn
+    Export:
+      Name: !Sub '${Environment}-S3PutObjectRuleArn' 

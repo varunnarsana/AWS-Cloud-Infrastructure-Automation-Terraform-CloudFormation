@@ -1,0 +1,269 @@
+name: Terraform CI/CD
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-ci.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-ci.yml'
+
+env:
+  TF_VERSION: '1.5.0'
+  TF_WORKING_DIR: 'terraform/stacks/main'
+
+jobs:
+  terraform-validate:
+    name: 'Terraform Validate'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+        
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+        
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+        
+      - name: Terraform Lint
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          # Install tflint
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install.sh | bash
+          export PATH=$PATH:$HOME/.local/bin
+          
+          # Run tflint
+          tflint --init
+          tflint
+          
+      - name: Security Scan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          # Install checkov
+          pip install checkov
+          
+          # Run security scan
+          checkov -d . --output cli --output junitxml --output-file-path ./
+          
+      - name: Upload Security Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-scan-results
+          path: ${{ env.TF_WORKING_DIR }}/checkov_report.xml
+
+  terraform-plan:
+    name: 'Terraform Plan'
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=aws-cloud-iac/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_TABLE }}" \
+            -backend-config="encrypt=true"
+            
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform workspace select dev || terraform workspace new dev
+          terraform plan -out=tfplan -var="db_password=${{ secrets.DB_PASSWORD }}"
+          
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-plan
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          
+      - name: Comment Plan on PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORKING_DIR }}/tfplan', 'utf8');
+            
+            const comment = `## Terraform Plan 📋
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`
+            ${plan}
+            \`\`\`
+            
+            </details>`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  terraform-apply-dev:
+    name: 'Terraform Apply (Dev)'
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=aws-cloud-iac/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_TABLE }}" \
+            -backend-config="encrypt=true"
+            
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform workspace select dev || terraform workspace new dev
+          terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+          
+      - name: Output Infrastructure Info
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform workspace select dev
+          terraform output
+          
+      - name: Comment Apply Results on PR
+        uses: actions/github-script@v6
+        if: always()
+        with:
+          script: |
+            const comment = `## Terraform Apply Complete ✅
+            
+            Infrastructure has been deployed to **dev** environment.
+            
+            **Next Steps:**
+            1. Deploy CloudFormation stack for IAM/Lambda/EventBridge
+            2. Run smoke tests to verify deployment
+            3. Monitor CloudWatch metrics and alarms
+            
+            **Resources Created:**
+            - VPC with public/private subnets
+            - Application Load Balancer
+            - EC2 Auto Scaling Group
+            - RDS PostgreSQL database
+            - S3 buckets for logs, artifacts, and data
+            - CloudWatch monitoring and alarms`;
+            
+            // Find the latest PR and comment
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 1
+            });
+            
+            if (prs.length > 0) {
+              github.rest.issues.createComment({
+                issue_number: prs[0].number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+
+  terraform-apply-prod:
+    name: 'Terraform Apply (Prod)'
+    runs-on: ubuntu-latest
+    needs: terraform-apply-dev
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: prod
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=aws-cloud-iac/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_STATE_TABLE }}" \
+            -backend-config="encrypt=true"
+            
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform workspace select prod || terraform workspace new prod
+          terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+          
+      - name: Output Infrastructure Info
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform workspace select prod
+          terraform output 
