@@ -2,16 +2,14 @@
 
 A production-grade, multi-AZ AWS foundation using Terraform for core infrastructure and CloudFormation for IAM, Lambda, and EventBridge components. This project demonstrates end-to-end infrastructure automation with CI/CD, security, monitoring, and cost guardrails.
 
-## 🎯 Project Goals
-
-This project proves to hiring managers that you can:
+## Project Goals
 
 - **Design, automate, and operate cloud infrastructure with Infrastructure as Code (IaC)**
 - **Hands-on experience** with VPC, EC2, RDS, S3, IAM, CloudWatch, EventBridge, CloudFormation, Terraform, and GitHub Actions for CI/CD
 - **Understand security, high availability, cost control, and observability** principles
 - **Implement production-ready patterns** for cloud infrastructure
 
-## 🏗️ Target Architecture
+## Target Architecture
 
 ### High-Level Overview
 - **VPC** (10.0.0.0/16) with 2 public and 2 private subnets across 2 AZs
@@ -38,7 +36,7 @@ Private Subnets (AZ-a, AZ-b)
 EC2 Auto Scaling Group + RDS
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - AWS CLI configured with appropriate permissions
@@ -79,7 +77,7 @@ EC2 Auto Scaling Group + RDS
      --parameter-overrides file://cloudformation/parameters-dev.json
    ```
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 aws-cloud-iac/
@@ -113,7 +111,7 @@ aws-cloud-iac/
    └─ smoke-test.sh
 ```
 
-## 🔧 Core Components
+## Core Components
 
 ### 1. Terraform Infrastructure
 - **VPC Module**: Creates VPC with public/private subnets, route tables, and NAT gateways
@@ -123,7 +121,7 @@ aws-cloud-iac/
 - **S3 Module**: Three buckets (logs, artifacts, data) with lifecycle policies
 - **CloudWatch Module**: Monitoring, alarms, and SNS notifications
 
-### 2. CloudFormation Stack
+### 2.CloudFormation Stack
 - **IAM Roles**: EC2 instance profile, Lambda execution, and deployment roles
 - **Lambda Function**: "Bucket Guardian" for S3 lifecycle validation and enforcement
 - **EventBridge Rules**: Scheduled and event-driven Lambda triggers
@@ -134,7 +132,7 @@ aws-cloud-iac/
 - **Docker Container**: Containerized application with health monitoring
 - **User Data Script**: Bootstrap script for EC2 instances
 
-## 🔒 Security Features
+## Security Features
 
 - **Private subnets** for compute and database resources
 - **Security Groups** with least-privilege access
@@ -143,7 +141,7 @@ aws-cloud-iac/
 - **IAM roles** with minimal required permissions
 - **VPC endpoints** for AWS services (optional)
 
-## 💰 Cost Optimization
+## Cost Optimization
 
 - **AWS Budgets** with alerts for cost thresholds
 - **S3 lifecycle policies** to transition data to cheaper storage tiers
@@ -151,7 +149,7 @@ aws-cloud-iac/
 - **Auto Scaling** to right-size compute resources
 - **RDS instance scheduling** for non-production environments
 
-## 📊 Monitoring & Observability
+## Monitoring & Observability
 
 - **CloudWatch Logs** for application and infrastructure logs
 - **Custom metrics** for application performance
@@ -159,7 +157,7 @@ aws-cloud-iac/
 - **SNS notifications** for critical alerts
 - **Dashboards** for operational visibility
 
-## 🚀 CI/CD Pipeline
+## CI/CD Pipeline
 
 ### GitHub Actions Workflows
 1. **Terraform CI**: Format, validate, lint, plan, and apply infrastructure changes
@@ -171,7 +169,7 @@ aws-cloud-iac/
 - **Prod**: Manual approval required before deployment
 - **State Management**: S3 backend with DynamoDB locking
 
-## 🧪 Testing & Validation
+## Testing & Validation
 
 ### Smoke Tests
 - Health check endpoint verification
@@ -184,7 +182,7 @@ aws-cloud-iac/
 - RDS failover testing
 - ALB health check validation
 
-## 🗑️ Cleanup
+## 🗑Cleanup
 
 ### Destroy Infrastructure
 ```bash
@@ -200,7 +198,7 @@ aws s3 rb s3://app-artifacts-dev-<account> --force
 aws s3 rb s3://app-data-dev-<account> --force
 ```
 
-## 📋 Evaluation Checklist
+## Evaluation Checklist
 
 ### Infrastructure as Code
 - [ ] Terraform builds VPC, EC2/ASG, RDS, S3, ALB, IAM, CloudWatch
@@ -233,7 +231,7 @@ aws s3 rb s3://app-data-dev-<account> --force
 - [ ] Runbook for common operations
 - [ ] Demo scripts for validation
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -241,11 +239,11 @@ aws s3 rb s3://app-data-dev-<account> --force
 4. Run tests and validation
 5. Submit a pull request
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🆘 Support
+## Support
 
 For questions or issues:
 1. Check the troubleshooting section in this README
